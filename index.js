@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const { Telegraf } = require('telegraf');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
@@ -19,48 +20,45 @@ const bot = new Telegraf(BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(GEMINI_KEY);
 
 // ==========================================
-// 🧠 AI ENGINE: MULTI-APP SPLITTER
+// 🧠 AI "DEEP SCAN" ENGINE
 // ==========================================
 
 async function extractCodesWithAI(rawText) {
     try {
         const model = genAI.getGenerativeModel({ model: "gemini-pro"});
         
-        // 🔥 PROMPT: Designed to split text into multiple apps if needed
+        // 🔥 UPGRADED "DEEP SCAN" PROMPT
         const prompt = `
-        You are an advanced Data Extractor.
-        Analyze the text below. It might contain promo codes for ONE app, or MULTIPLE different apps.
+        You are a Deep Scan Promo Detector. 
+        Analyze the ENTIRE text below (Header, Body, Footer) to extract the 'App Name' and ALL 'Promo Codes'.
 
         INPUT TEXT: 
         "${rawText}"
 
-        YOUR TASK:
-        Return a JSON ARRAY of objects. Each object represents one App and its codes.
+        TASKS:
+        1. **App Name**: 
+           - Look at the very first line.
+           - Look for words like "Club", "Win", "Bet", "Loot", "Mall", "Game".
+           - Example: "11Win Loot" -> App Name is "11Win". "Diwa777 Code" -> App Name is "Diwa777".
+           - If NO name is found, use "Exclusive Loot".
 
-        RULES:
-        1. **Split Apps**: If the text says "IN7 Code: A" and "IE777 Code: B", create TWO objects.
-        2. **App Name**: Extract from the line near the code. If unknown, use "Exclusive Loot".
-        3. **Codes**: Extract all codes associated with that specific app.
-           - Handle simple codes (e.g. "5858")
-           - Handle complex codes (e.g. "DIWA777xfhj...")
-           - Ignore links, prices, and dates.
-        4. **Single App**: If only one app is found, return an array with just one object.
-
-        REQUIRED JSON FORMAT (Array):
-        [
-          { "appName": "App Name 1", "codes": ["CodeA", "CodeB"] },
-          { "appName": "App Name 2", "codes": ["CodeC"] }
-        ]
+        2. **Codes (Extract ALL, from 1 to 10)**:
+           - Look for explicit patterns: "Code: ABC", "Gift >> 1234", "Redeem - XYZ".
+           - Look for implicit patterns: "hello" (if text says 'Code: hello'), "5858" (if text says 'Gift 5858').
+           - Look for STANDALONE alphanumeric strings that look like codes (e.g., "DIWA500", "BONUS20").
+           - Ignore links (http...), ignore prices (₹100).
         
-        Return ONLY valid JSON. No Markdown.
+        OUTPUT RULES:
+        - Return ONLY valid JSON.
+        - Format: {"appName": "Name Found", "codes": ["Code1", "Code2", "Code3"]}
         `;
 
         const result = await model.generateContent(prompt);
         const response = await result.response;
         let text = response.text();
 
-        // Safe JSON Parse
-        const jsonMatch = text.match(/\[[\s\S]*\]/); // Look for Array [...]
+        // Safe JSON Clean & Parse
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
         if (!jsonMatch) return null;
         
         return JSON.parse(jsonMatch[0]);
@@ -72,44 +70,41 @@ async function extractCodesWithAI(rawText) {
 }
 
 // ==========================================
-// 🕵️‍♂️ MANUAL FALLBACK (Simple Safety Net)
+// 🕵️‍♂️ MANUAL FALLBACK (Regex)
 // ==========================================
 
 function manualExtract(text) {
-    // Note: Manual fallback is dumb; it assumes only 1 app exists. 
-    // It's a last resort if AI crashes.
     let codes = [];
     let appName = "Exclusive Loot";
 
-    // 1. App Name (First non-emoji word)
+    // 1. Try to find App Name (First 2 words of first line)
     const lines = text.split('\n').filter(l => l.trim().length > 0);
     if (lines.length > 0) {
-        let cleanLine = lines[0].replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}]/gu, '');
-        let words = cleanLine.split(' ');
-        if (words.length > 0) appName = words.slice(0, 2).join(' ').replace(/[^a-zA-Z0-9]/g, '');
+        let firstLineClean = lines[0].replace(/[^a-zA-Z0-9 ]/g, '').trim();
+        let words = firstLineClean.split(' ');
+        if (words.length > 0) appName = words.slice(0, 2).join(' ');
     }
 
-    // 2. Code Extraction Regex
-    const regex = /(?:Code|Gift|Promo|Loot|Bonus|Pin|Redeem)\s*[:\->>»=]+\s*([a-zA-Z0-9@#&]+)/gi;
+    // 2. Aggressive Regex for Codes
+    // Captures: "Code: value", "Code >> value", "Code-value", "Code value"
+    const keywordRegex = /(?:Code|Gift|Promo|Loot|Bonus|Pin|Pass|Redeem)\s*[:\->>»=]+\s*([a-zA-Z0-9@#]+)/gi;
     let match;
-    while ((match = regex.exec(text)) !== null) {
-        if (match[1] && match[1].length > 2 && !match[1].includes('http')) {
+    while ((match = keywordRegex.exec(text)) !== null) {
+        if (match[1] && match[1].length > 2 && !match[1].startsWith('http')) {
             codes.push(match[1]);
         }
     }
-    
-    // 3. Fallback for standalone strings (like DIWA777...)
+
+    // 3. Number Fallback (find 4-8 digit numbers if no keyword found)
     if (codes.length === 0) {
-        const complexRegex = /\b[A-Za-z0-9@#&]{5,25}\b/g; 
-        let cMatch;
-        while ((cMatch = complexRegex.exec(text)) !== null) {
-            let s = cMatch[0];
-            if (!s.startsWith('http') && !s.includes('.com') && isNaN(s)) codes.push(s);
+        const numRegex = /\b\d{4,8}\b/g;
+        let numMatch;
+        while ((numMatch = numRegex.exec(text)) !== null) {
+            codes.push(numMatch[0]);
         }
     }
 
-    // Return as an ARRAY to match AI format
-    return [{ appName, codes }];
+    return { appName, codes: [...new Set(codes)] };
 }
 
 // ==========================================
@@ -140,7 +135,7 @@ bot.command('private', (ctx) => {
     ctx.reply("🔒 **Bot is Private.**");
 });
 
-bot.start((ctx) => ctx.reply("👋 **Ready!** Forward me any message.\nI can handle multiple apps in one message!"));
+bot.start((ctx) => ctx.reply("👋 **Ready!** Forward me any promo message."));
 
 // ==========================================
 // 📩 MESSAGE HANDLER
@@ -167,57 +162,50 @@ bot.on('message', async (ctx) => {
         const text = ctx.message.text || ctx.message.caption;
         if (!text || text.startsWith('/')) return;
 
-        const processingMsg = await ctx.reply("⏳ *Scanning...*", { parse_mode: 'Markdown' });
+        const processingMsg = await ctx.reply("⏳ *Deep Scanning...*", { parse_mode: 'Markdown' });
 
-        // --- 🚀 EXECUTE SCAN ---
-        let results = await extractCodesWithAI(text);
+        // --- 🚀 EXECUTE DEEP SCAN ---
+        
+        // 1. Try AI First
+        let data = await extractCodesWithAI(text);
 
-        // Fallback if AI fails completely
-        if (!results || results.length === 0) {
-            console.log("⚠️ AI failed, using Manual Fallback.");
-            results = manualExtract(text);
+        // 2. If AI returns nothing or empty codes, use Manual
+        if (!data || !data.codes || data.codes.length === 0) {
+            console.log("⚠️ AI found nothing, switching to Regex.");
+            data = manualExtract(text);
         }
         
+        // --- 🚀 END SCAN ---
+
         try { await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id); } catch(e) {}
 
-        // --- 📤 SEND MESSAGES (Loop through results) ---
+        // Final Check
+        if (!data || !data.codes || data.codes.length === 0) {
+            return ctx.reply("❌ **No Codes Found.**\nI scanned the whole text but couldn't find a valid code pattern.");
+        }
+
+        // Clean App Name (Fallback to 'Unknown' if empty)
+        const displayAppName = (data.appName && data.appName !== "None") ? data.appName : "Exclusive Loot";
+
+        // ==========================================
+        // 🎨 BEAUTIFUL MESSAGE GENERATION
+        // ==========================================
         
-        // Filter out items with no codes
-        const validResults = results.filter(item => item.codes && item.codes.length > 0);
+        let formattedMsg = `<b>🎊 NEW LOOT FOR ${displayAppName.toUpperCase()} 🎊</b>\n\n`;
+        formattedMsg += `🔥 <b>App Name:</b> ${displayAppName}\n`;
+        formattedMsg += `➖➖➖➖➖➖➖➖➖➖\n\n`;
+        
+        // Loop through ALL codes found
+        data.codes.forEach((code, index) => {
+            formattedMsg += `🎁 <b>Code ${index + 1}:</b> <code>${code}</code>\n`;
+        });
 
-        if (validResults.length === 0) {
-            return ctx.reply("❌ **No Codes Found.**");
-        }
+        formattedMsg += `\n➖➖➖➖➖➖➖➖➖➖\n`;
+        formattedMsg += `<i>⚡️ Click on any code to copy!</i>\n\n`;
+        
+        if (customFooter) formattedMsg += `<b>${customFooter}</b>`;
 
-        // Send a separate message for EACH app found
-        for (const item of validResults) {
-            
-            // 1. Clean Duplicate Codes (Set)
-            const uniqueCodes = [...new Set(item.codes)];
-            
-            // 2. Format App Name
-            const appName = item.appName || "Exclusive Loot";
-
-            // 3. Build Message
-            let formattedMsg = `<b>🎊 NEW LOOT FOR ${appName.toUpperCase()} 🎊</b>\n\n`;
-            formattedMsg += `🔥 <b>App Name:</b> ${appName}\n`;
-            formattedMsg += `➖➖➖➖➖➖➖➖➖➖\n\n`;
-            
-            uniqueCodes.forEach((code, index) => {
-                formattedMsg += `🎁 <b>Code ${index + 1}:</b> <code>${code}</code>\n`;
-            });
-
-            formattedMsg += `\n➖➖➖➖➖➖➖➖➖➖\n`;
-            formattedMsg += `<i>⚡️ Click on any code to copy!</i>\n\n`;
-            
-            if (customFooter) formattedMsg += `<b>${customFooter}</b>`;
-
-            // 4. Send
-            await ctx.reply(formattedMsg, { parse_mode: 'HTML' });
-            
-            // Small delay between messages to prevent flooding issues
-            await new Promise(r => setTimeout(r, 500)); 
-        }
+        await ctx.reply(formattedMsg, { parse_mode: 'HTML' });
 
     } catch (e) {
         console.error("Bot Error:", e);
@@ -226,6 +214,6 @@ bot.on('message', async (ctx) => {
 });
 
 // Launch
-bot.launch().then(() => console.log("✅ Multi-App Bot Online"));
+bot.launch().then(() => console.log("✅ Deep Scan Bot Online"));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
