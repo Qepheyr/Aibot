@@ -3,7 +3,7 @@ const { Telegraf } = require('telegraf');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // ==========================================
-// ⚙️ CONFIGURATION & CREDENTIALS
+// ⚙️ CONFIGURATION
 // ==========================================
 
 const BOT_TOKEN = process.env.BOT_TOKEN || "8387077251:AAEgvuXxCWiXt8SKBgHVkHVmD4O6bZxdiac";
@@ -19,78 +19,94 @@ const bot = new Telegraf(BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(GEMINI_KEY);
 
 // ==========================================
-// 🧠 HYBRID EXTRACTION ENGINE
+// 🧠 AI "DEEP SCAN" ENGINE
 // ==========================================
 
-// 1. MANUAL FALLBACK (The Safety Net)
-// If AI fails, this math-based logic forces extraction
-function manualExtract(text) {
-    let codes = [];
-    let appName = "Loot App";
-
-    // A. Try to find App Name (First line usually)
-    const lines = text.split('\n').filter(l => l.trim().length > 0);
-    if (lines.length > 0) {
-        // Take first 3 words of first line as tentative app name
-        let firstLineWords = lines[0].replace(/[^a-zA-Z0-9 ]/g, '').split(' ');
-        if (firstLineWords.length > 0) appName = firstLineWords.slice(0, 3).join(' ');
-    }
-
-    // B. Aggressive Regex to find codes
-    // Looks for: "Code : value", "Code >> value", "Code-value", "Code value"
-    const regex = /(?:Code|Gift|Promo|Loot|Bonus|Pin|Pass|Redeem)\s*[:\->>»=]+\s*([a-zA-Z0-9@#]+)/gi;
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-        if (match[1] && match[1].length > 2) {
-            codes.push(match[1]);
-        }
-    }
-
-    // C. If keywords failed, look for isolated 4-8 digit numbers (common in these apps)
-    if (codes.length === 0) {
-        const numberRegex = /\b\d{4,8}\b/g;
-        let numMatch;
-        while ((numMatch = numberRegex.exec(text)) !== null) {
-            codes.push(numMatch[0]);
-        }
-    }
-
-    return { appName, codes: [...new Set(codes)] }; // Remove duplicates
-}
-
-// 2. MAIN AI FUNCTION
 async function extractCodesWithAI(rawText) {
     try {
         const model = genAI.getGenerativeModel({ model: "gemini-pro"});
         
-        // 🔥 SUPER AGGRESSIVE PROMPT
+        // 🔥 UPGRADED "DEEP SCAN" PROMPT
         const prompt = `
-        Act as a regex parser. Extract 'App Name' and 'Promo Codes' from this messy text.
+        You are a Deep Scan Promo Detector. 
+        Analyze the ENTIRE text below (Header, Body, Footer) to extract the 'App Name' and ALL 'Promo Codes'.
+
+        INPUT TEXT: 
+        "${rawText}"
+
+        TASKS:
+        1. **App Name**: 
+           - Look at the very first line.
+           - Look for words like "Club", "Win", "Bet", "Loot", "Mall", "Game".
+           - If app name is not in top lines, then search the whole text.
+           - Example: "11Win Loot" -> App Name is "11Win". "Diwa777 Code" -> App Name is "Diwa777".
+           - If NO name is found, use "Exclusive Loot".
+
+        2. **Codes (Extract ALL, from 1 to 10)**:
+           - Look for explicit patterns: "Code: ABC", "Gift >> 1234", "Redeem - XYZ".
+           - Code can be of any type and any line must reaearch first then extract all the cdies available.
+           - code can be simple as well as complex like, "HELLOW" or "383DJD£#JEI&38".
+           - Look for implicit patterns: "hello" (if text says 'Code: hello'), "5858" (if text says 'Gift 5858').
+           - Look for STANDALONE alphanumeric strings that look like codes (e.g., "DIWA500", "BONUS20").
+           - Ignore links (http...), ignore prices (₹100).
         
-        INPUT: "${rawText}"
-        
-        INSTRUCTIONS:
-        1. App Name: Usually the first 1-3 words (e.g., "11Win", "Exploit Bit", "Diwa").
-        2. Codes: ANYTHING that looks like a value after keywords like "Code", "Gift", ">>", ":", or simple numbers like "5858" or words like "hello".
-        3. BE AGGRESSIVE. If you see "Code: hello", extract "hello". If you see "Gift Code >> 5858", extract "5858".
-        
-        Return JSON ONLY: {"appName": "Name", "codes": ["Code1", "Code2"]}
+        OUTPUT RULES:
+        - Return ONLY valid JSON.
+        - Format: {"appName": "Name Found", "codes": ["Code1", "Code2", "Code3"]}
         `;
 
         const result = await model.generateContent(prompt);
         const response = await result.response;
         let text = response.text();
 
-        // Robust JSON Cleanup (Finds the {...} block even if AI adds extra text)
+        // Safe JSON Clean & Parse
         const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error("No JSON found");
+        if (!jsonMatch) return null;
         
         return JSON.parse(jsonMatch[0]);
 
     } catch (error) {
-        console.error("AI Error (Switching to Manual):", error.message);
-        return null; // Return null to trigger manual fallback
+        console.error("AI Error:", error.message);
+        return null;
     }
+}
+
+// ==========================================
+// 🕵️‍♂️ MANUAL FALLBACK (Regex)
+// ==========================================
+
+function manualExtract(text) {
+    let codes = [];
+    let appName = "Exclusive Loot";
+
+    // 1. Try to find App Name (First 2 words of first line)
+    const lines = text.split('\n').filter(l => l.trim().length > 0);
+    if (lines.length > 0) {
+        let firstLineClean = lines[0].replace(/[^a-zA-Z0-9 ]/g, '').trim();
+        let words = firstLineClean.split(' ');
+        if (words.length > 0) appName = words.slice(0, 2).join(' ');
+    }
+
+    // 2. Aggressive Regex for Codes
+    // Captures: "Code: value", "Code >> value", "Code-value", "Code value"
+    const keywordRegex = /(?:Code|Gift|Promo|Loot|Bonus|Pin|Pass|Redeem)\s*[:\->>»=]+\s*([a-zA-Z0-9@#]+)/gi;
+    let match;
+    while ((match = keywordRegex.exec(text)) !== null) {
+        if (match[1] && match[1].length > 2 && !match[1].startsWith('http')) {
+            codes.push(match[1]);
+        }
+    }
+
+    // 3. Number Fallback (find 4-8 digit numbers if no keyword found)
+    if (codes.length === 0) {
+        const numRegex = /\b\d{4,8}\b/g;
+        let numMatch;
+        while ((numMatch = numRegex.exec(text)) !== null) {
+            codes.push(numMatch[0]);
+        }
+    }
+
+    return { appName, codes: [...new Set(codes)] };
 }
 
 // ==========================================
@@ -121,7 +137,7 @@ bot.command('private', (ctx) => {
     ctx.reply("🔒 **Bot is Private.**");
 });
 
-bot.start((ctx) => ctx.reply("👋 **Ready!** Forward me any message.\nAdmin: /end, /public, /private"));
+bot.start((ctx) => ctx.reply("👋 **Ready!** Forward me any promo message."));
 
 // ==========================================
 // 📩 MESSAGE HANDLER
@@ -148,33 +164,40 @@ bot.on('message', async (ctx) => {
         const text = ctx.message.text || ctx.message.caption;
         if (!text || text.startsWith('/')) return;
 
-        const processingMsg = await ctx.reply("⏳ *Extracting...*", { parse_mode: 'Markdown' });
+        const processingMsg = await ctx.reply("⏳ *Deep Scanning...*", { parse_mode: 'Markdown' });
 
-        // --- 🚀 HYBRID LOGIC START ---
+        // --- 🚀 EXECUTE DEEP SCAN ---
         
-        // Step 1: Try AI
+        // 1. Try AI First
         let data = await extractCodesWithAI(text);
 
-        // Step 2: If AI failed or found 0 codes, use Manual Regex
+        // 2. If AI returns nothing or empty codes, use Manual
         if (!data || !data.codes || data.codes.length === 0) {
-            console.log("⚠️ AI failed, using Manual Regex.");
+            console.log("⚠️ AI found nothing, switching to Regex.");
             data = manualExtract(text);
         }
         
-        // --- 🚀 HYBRID LOGIC END ---
+        // --- 🚀 END SCAN ---
 
         try { await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id); } catch(e) {}
 
-        // Final Validation
+        // Final Check
         if (!data || !data.codes || data.codes.length === 0) {
-            return ctx.reply("❌ **Failed.**\nI couldn't find any code in that message even with manual search.");
+            return ctx.reply("❌ **No Codes Found.**\nI scanned the whole text but couldn't find a valid code pattern.");
         }
 
-        // Format Message
-        let formattedMsg = `<b>🎊 NEW LOOT FOR ${data.appName.toUpperCase()} 🎊</b>\n\n`;
-        formattedMsg += `🔥 <b>App Name:</b> ${data.appName}\n`;
+        // Clean App Name (Fallback to 'Unknown' if empty)
+        const displayAppName = (data.appName && data.appName !== "None") ? data.appName : "Exclusive Loot";
+
+        // ==========================================
+        // 🎨 BEAUTIFUL MESSAGE GENERATION
+        // ==========================================
+        
+        let formattedMsg = `<b>🎊 NEW LOOT FOR ${displayAppName.toUpperCase()} 🎊</b>\n\n`;
+        formattedMsg += `🔥 <b>App Name:</b> ${displayAppName}\n`;
         formattedMsg += `➖➖➖➖➖➖➖➖➖➖\n\n`;
         
+        // Loop through ALL codes found
         data.codes.forEach((code, index) => {
             formattedMsg += `🎁 <b>Code ${index + 1}:</b> <code>${code}</code>\n`;
         });
@@ -193,6 +216,6 @@ bot.on('message', async (ctx) => {
 });
 
 // Launch
-bot.launch().then(() => console.log("✅ Hybrid Bot Online"));
+bot.launch().then(() => console.log("✅ Deep Scan Bot Online"));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
