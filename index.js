@@ -3,14 +3,14 @@ const { Telegraf } = require('telegraf');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // ==========================================
-// ⚙️ CONFIGURATION
+// 1. ⚙️ CONFIGURATION BLOCK
 // ==========================================
 
 const BOT_TOKEN = process.env.BOT_TOKEN || "8387077251:AAEgvuXxCWiXt8SKBgHVkHVmD4O6bZxdiac";
 const GEMINI_KEY = process.env.GEMINI_KEY || "AIzaSyC5PL0nqKgrMRbFVwmfybOLAdI0-HIcrjY";
 const ADMIN_ID = process.env.ADMIN_ID || "8435248854";
 
-// SETTINGS
+// Global State
 let isAdminOnly = true;        
 let customFooter = "";         
 let adminState = null;         
@@ -19,38 +19,52 @@ const bot = new Telegraf(BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(GEMINI_KEY);
 
 // ==========================================
-// 🧠 AI ENGINE: SMART & STRICT
+// 2. 🚫 BLACKLIST & FILTERS
 // ==========================================
 
-async function extractCodesWithAI(rawText) {
+const GLOBAL_BLACKLIST = [
+    "CODE", "GIFT", "PROMO", "PROMOCODE", "LINK", "CLICK", "HERE", "JOIN", 
+    "PROOF", "PROOFS", "SEND", "BOT", "CHANNEL", "REGISTER", "LOGIN", 
+    "SIGNUP", "BONUS", "WITHDRAW", "LOOT", "APP", "GAME", "WIN", "PLAY",
+    "TODAY", "NEW", "BIG", "BEST", "FAST", "CLAIM", "UPTO", "VERIFIED",
+    "AGENT", "COM", "ME", "NET", "ORG", "INFO", "RANDOM", "DAILY", 
+    "REWARD", "MIN", "MAX", "DEPOSIT", "CONTACT", "SERVICE", "SUPPORT", 
+    "TELEGRAM", "WHATSAPP", "AMOUNT", "BALANCE", "SUCCESS", "FAILED"
+];
+
+// ==========================================
+// 3. 🧠 AI PROMPT BLOCK
+// ==========================================
+
+async function runAI_Extraction(rawText) {
     try {
         const model = genAI.getGenerativeModel({ model: "gemini-pro"});
         
-        // 🔥 PROMPT: Added strict "Negative Constraints"
         const prompt = `
-        You are an advanced Data Extractor.
-        Analyze the text below. Extract App Names and Codes.
+        ROLE: Data Extraction Specialist.
+        TASK: Analyze text to extract 'App Names' and 'Promo Codes'.
 
         INPUT TEXT: 
-        "${rawText}"
+        """
+        ${rawText}
+        """
 
-        RULES:
-        1. **App Name**: Extract the clean name. 
-           - Remove emojis (😆Diwa777 -> Diwa777).
-           - Remove versions/ordinals (Diwa777 4th -> Diwa777).
-        
-        2. **Codes**: Extract ACTUAL codes only.
-           - **STRICTLY IGNORE** labels like: "Promocode", "Gift Code", "Link", "Proof", "Click", "Here", "Bonus", "Register".
-           - **Example:** If text says "Big Promocode 👇👇 DIWA123", the code is "DIWA123", NOT "Promocode".
-           - **Example:** If text says "Send Proofs @Bot", "Proofs" is NOT a code.
-           - Codes are usually Uppercase, Alphanumeric, or Numbers (e.g., 5858, DIWA777xyz).
+        INSTRUCTIONS:
+        1. **App Name**: Extract the name (e.g., "SpinWinner", "Diwa777"). 
+           - Remove emojis and words like "Loot", "Offer".
+           - If unknown, use "Exclusive Loot".
 
-        3. **Multi-App**: If multiple apps exist, split them into the array.
+        2. **Code Extraction**:
+           - **URLS**: If text has 'spinwinner.com?code=XYZ', extract 'XYZ'.
+           - **DOMAINS**: If text has 'Code: spinwinner.com', extract 'spinwinner.com' (System will clean .com later).
+           - **PATTERNS**: Look for "Code: ABC", "Gift >> 123", or standalone strings "DIWA555".
+           
+        3. **Cleanup**:
+           - Do NOT extract timestamps ("173600...").
+           - Do NOT extract generic words ("Verified", "Proof").
 
-        REQUIRED JSON FORMAT:
-        [
-          { "appName": "Name", "codes": ["Code1"] }
-        ]
+        4. **Format**: Return JSON Array.
+        [ { "appName": "Name", "codes": ["Code1", "Code2"] } ]
         `;
 
         const result = await model.generateContent(prompt);
@@ -63,84 +77,108 @@ async function extractCodesWithAI(rawText) {
         return JSON.parse(jsonMatch[0]);
 
     } catch (error) {
-        console.error("AI Error:", error.message);
+        console.error("AI Logic Error:", error.message);
         return null;
     }
 }
 
 // ==========================================
-// 🕵️‍♂️ MANUAL FALLBACK + FILTERING
+// 4. 🛠️ MANUAL FALLBACK BLOCK
 // ==========================================
 
-// 🚫 Words that are NEVER codes
-const BLACKLIST = [
-    "CODE", "GIFT", "PROMO", "PROMOCODE", "LINK", "CLICK", "HERE", "JOIN", 
-    "PROOF", "PROOFS", "SEND", "BOT", "CHANNEL", "REGISTER", "LOGIN", 
-    "SIGNUP", "BONUS", "WITHDRAW", "LOOT", "APP", "GAME", "WIN", "PLAY",
-    "TODAY", "NEW", "BIG", "BEST", "FAST", "CLAIM"
-];
-
-function isCleanCode(code) {
-    if (!code) return false;
-    const upper = code.toUpperCase();
-    
-    // 1. Check Blacklist
-    if (BLACKLIST.includes(upper)) return false;
-    
-    // 2. Check Valid Length (Codes usually 4-30 chars)
-    if (code.length < 3 || code.length > 35) return false;
-
-    // 3. Check for URL/Links
-    if (code.includes('http') || code.includes('www') || code.includes('.com') || code.includes('.in')) return false;
-
-    // 4. Check for strict non-code characters (like @ for usernames)
-    if (code.startsWith('@')) return false;
-
-    return true;
-}
-
-function manualExtract(text) {
+function runManual_Extraction(text) {
     let codes = [];
     let appName = "Exclusive Loot";
 
-    // 1. App Name (Remove Emojis and grab first word)
+    // A. App Name
     const lines = text.split('\n').filter(l => l.trim().length > 0);
     if (lines.length > 0) {
-        let cleanLine = lines[0].replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}]/gu, '');
-        // Remove common filler words from title line
-        cleanLine = cleanLine.replace(/4th|3rd|Big|Loot|Promocode|Gift/gi, '').trim();
-        let words = cleanLine.split(' ');
-        if (words.length > 0) appName = words[0].replace(/[^a-zA-Z0-9]/g, '');
+        let cleanHeader = lines[0].replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}]/gu, '');
+        cleanHeader = cleanHeader.replace(/New|Promo|Code|Loot|Gift|Offer|Big|Win|👇|🔥/gi, '').trim();
+        let words = cleanHeader.split(/[\s-]+/);
+        if (words.length > 0) appName = words[0]; 
     }
 
-    // 2. Extract Candidates
-    const candidates = text.match(/\b[a-zA-Z0-9@#&]{4,30}\b/g) || [];
-    
-    // 3. Filter Candidates
-    candidates.forEach(word => {
-        if (isCleanCode(word)) {
-            // Additional check: mostly numbers or uppercase mixed
-            codes.push(word);
-        }
-    });
+    // B. URL Parameter (e.g., ?code=XYZ)
+    const urlParams = /[?&](?:code|invite|refer|referral|bonus_code)=([a-zA-Z0-9]+)/gi;
+    let urlMatch;
+    while ((urlMatch = urlParams.exec(text)) !== null) {
+        if (urlMatch[1]) codes.push(urlMatch[1]);
+    }
+
+    // C. Keywords (Code: XYZ)
+    const keywordRegex = /(?:Code|Gift|Promo|Loot|Bonus|Pin)\s*[:\->>»=]+\s*([a-zA-Z0-9@#&.]+)/gi; // Added . to allow domains temporarily
+    let keyMatch;
+    while ((keyMatch = keywordRegex.exec(text)) !== null) {
+        if (keyMatch[1] && !keyMatch[1].startsWith('http')) codes.push(keyMatch[1]);
+    }
+
+    // D. Standalone Strings
+    const complexRegex = /\b[A-Za-z0-9]{4,30}\b/g;
+    let wordMatch;
+    while ((wordMatch = complexRegex.exec(text)) !== null) {
+        codes.push(wordMatch[0]);
+    }
 
     return [{ appName, codes: [...new Set(codes)] }];
 }
 
 // ==========================================
-// 🛡️ COMMANDS
+// 5. 🧼 SANITIZER & VALIDATOR BLOCK (NEW!)
+// ==========================================
+
+// 🔥 NEW: Removes .com, .in, etc. from codes
+function sanitizeCode(rawCode) {
+    if (!rawCode) return "";
+    let clean = rawCode.trim();
+    
+    // Remove domain extensions
+    clean = clean.replace(/\.com|\.in|\.me|\.org|\.net|\.xyz|\.online/gi, "");
+    
+    // Remove common URL clutter
+    clean = clean.replace(/https?:\/\/|www\./gi, "");
+    
+    return clean;
+}
+
+function validateCode(code, currentAppName) {
+    if (!code) return false;
+    let upper = code.toUpperCase();
+
+    // RULE 1: Length
+    if (code.length < 3 || code.length > 40) return false;
+
+    // RULE 2: Blacklist
+    if (GLOBAL_BLACKLIST.includes(upper)) return false;
+
+    // RULE 3: Structure (Must not look like a full link anymore)
+    if (code.match(/http|www|&t=|&dl=|%|@|\/\//)) return false;
+
+    // RULE 4: Timestamps
+    if (code.match(/^(16|17)\d{8}$/)) return false;
+
+    // RULE 5: Numeric Prices (100, 200, 500)
+    if (code.match(/^\d+$/)) {
+        if (["100", "200", "500", "1000"].includes(code)) return false;
+    }
+
+    return true;
+}
+
+// ==========================================
+// 6. 🛡️ BOT COMMANDS
 // ==========================================
 
 bot.command('end', (ctx) => {
     if (String(ctx.from.id) !== String(ADMIN_ID)) return;
     adminState = 'AWAITING_FOOTER';
-    ctx.reply("📝 **Set Footer Text**", { parse_mode: 'Markdown' });
+    ctx.reply("📝 **Footer Setup Mode**\nSend the text now.", { parse_mode: 'Markdown' });
 });
 
 bot.command('clear_end', (ctx) => {
     if (String(ctx.from.id) !== String(ADMIN_ID)) return;
     customFooter = "";
-    ctx.reply("🗑 Footer removed.", { parse_mode: 'Markdown' });
+    ctx.reply("🗑 Footer deleted.", { parse_mode: 'Markdown' });
 });
 
 bot.command('public', (ctx) => {
@@ -155,10 +193,10 @@ bot.command('private', (ctx) => {
     ctx.reply("🔒 **Bot is Private.**");
 });
 
-bot.start((ctx) => ctx.reply("👋 **Ready!** Forward me any promo message."));
+bot.start((ctx) => ctx.reply("👋 **Ready!** I now auto-clean .com from codes."));
 
 // ==========================================
-// 📩 MESSAGE HANDLER
+// 7. 📨 MESSAGE PROCESSING
 // ==========================================
 
 bot.on('message', async (ctx) => {
@@ -166,51 +204,68 @@ bot.on('message', async (ctx) => {
         const userId = String(ctx.from.id);
         const isAdmin = userId === String(ADMIN_ID);
 
+        // Footer Setup
         if (isAdmin && adminState === 'AWAITING_FOOTER') {
             if (ctx.message.text) {
                 customFooter = ctx.message.text;
                 adminState = null;
-                return ctx.reply("✅ Footer Saved!");
+                return ctx.reply("✅ Footer Updated!");
             }
         }
 
-        if (isAdminOnly && !isAdmin) return ctx.reply("⛔ Access Denied.");
+        if (isAdminOnly && !isAdmin) return ctx.reply("⛔ Admin Access Only.");
 
         const text = ctx.message.text || ctx.message.caption;
         if (!text || text.startsWith('/')) return;
 
-        const processingMsg = await ctx.reply("⏳ *Scanning...*", { parse_mode: 'Markdown' });
+        const processingMsg = await ctx.reply("⏳ *Smart Scan...*", { parse_mode: 'Markdown' });
 
-        // --- 🚀 SCAN ---
-        let results = await extractCodesWithAI(text);
-        if (!results || results.length === 0) results = manualExtract(text);
+        // Step 1: Extract (AI or Manual)
+        let results = await runAI_Extraction(text);
+        if (!results || results.length === 0) {
+            results = runManual_Extraction(text);
+        }
+
+        // Step 2: Clean & Validate
+        let finalOutput = [];
         
+        if (results && results.length > 0) {
+            results.forEach(app => {
+                let validCodes = [];
+                if (app.codes && Array.isArray(app.codes)) {
+                    app.codes.forEach(rawCode => {
+                        // A. SANITIZE (Remove .com)
+                        let clean = sanitizeCode(rawCode);
+                        
+                        // B. VALIDATE (Check if remaining text is good)
+                        if (validateCode(clean, app.appName)) {
+                            validCodes.push(clean);
+                        }
+                    });
+                }
+                
+                if (validCodes.length > 0) {
+                    finalOutput.push({
+                        appName: app.appName || "Exclusive Loot",
+                        codes: [...new Set(validCodes)]
+                    });
+                }
+            });
+        }
+
         try { await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id); } catch(e) {}
 
-        // --- 🧹 CLEANING PHASE ---
-        // Even if AI returns "Promocode" as a code, we filter it here manually
-        const finalResults = results.map(item => {
-            return {
-                appName: item.appName,
-                // Apply the isCleanCode filter to AI results too!
-                codes: item.codes.filter(c => isCleanCode(c)) 
-            };
-        }).filter(item => item.codes.length > 0);
-
-        if (finalResults.length === 0) {
+        if (finalOutput.length === 0) {
             return ctx.reply("❌ **No Valid Codes Found.**");
         }
 
-        // --- 📤 SEND MESSAGES ---
-        for (const item of finalResults) {
-            const uniqueCodes = [...new Set(item.codes)];
-            const appName = item.appName || "Exclusive Loot";
-
-            let formattedMsg = `<b>🎊 NEW LOOT FOR ${appName.toUpperCase()} 🎊</b>\n\n`;
-            formattedMsg += `🔥 <b>App Name:</b> ${appName}\n`;
+        // Step 3: Send
+        for (const item of finalOutput) {
+            let formattedMsg = `<b>🎊 NEW LOOT FOR ${item.appName.toUpperCase()} 🎊</b>\n\n`;
+            formattedMsg += `🔥 <b>App Name:</b> ${item.appName}\n`;
             formattedMsg += `➖➖➖➖➖➖➖➖➖➖\n\n`;
             
-            uniqueCodes.forEach((code, index) => {
+            item.codes.forEach((code, index) => {
                 formattedMsg += `🎁 <b>Code ${index + 1}:</b> <code>${code}</code>\n`;
             });
 
@@ -220,15 +275,15 @@ bot.on('message', async (ctx) => {
             if (customFooter) formattedMsg += `<b>${customFooter}</b>`;
 
             await ctx.reply(formattedMsg, { parse_mode: 'HTML' });
-            await new Promise(r => setTimeout(r, 500)); 
+            await new Promise(r => setTimeout(r, 400));
         }
 
     } catch (e) {
-        console.error("Bot Error:", e);
+        console.error("ERROR:", e);
         ctx.reply("⚠️ Error.");
     }
 });
 
-bot.launch().then(() => console.log("✅ Fixed Bot Online"));
+bot.launch().then(() => console.log("✅ BOT ONLINE"));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
